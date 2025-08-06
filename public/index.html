@@ -4,7 +4,33 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Twilio Phone Dialer</title>
-    <script src="https://sdk.twilio.com/js/client/releases/1.14.1/twilio.min.js"></script>
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+    <meta http-equiv="Pragma" content="no-cache">
+    <meta http-equiv="Expires" content="0">
+    <script src="https://media.twiliocdn.com/sdk/js/client/releases/1.14.0/twilio.min.js" 
+            onload="console.log('✅ Twilio SDK script loaded')" 
+            onerror="tryFallbackSDK()"></script>
+    <script>
+        // Fallback CDN if primary fails
+        function tryFallbackSDK() {
+            console.error('❌ Failed to load Twilio SDK, trying fallback...');
+            const script = document.createElement('script');
+            script.src = 'https://unpkg.com/@twilio/voice-sdk@2.11.0/dist/twilio.min.js';
+            script.onload = () => {
+                console.log('✅ Twilio Voice SDK fallback loaded');
+                // Check if we now have the Twilio object
+                if (typeof Device !== 'undefined') {
+                    window.Twilio = { Device: Device };
+                    console.log('✅ Twilio Device available');
+                }
+            };
+            script.onerror = () => {
+                console.error('❌ All Twilio SDK sources failed - browser calling disabled');
+                showCallStatus('Twilio SDK failed to load - browser calling disabled', 'error');
+            };
+            document.head.appendChild(script);
+        }
+    </script>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -238,7 +264,8 @@
         // Initialize the app
         async function initializeApp() {
             try {
-                const config = await fetch('/api/config').then(r => r.json());
+                console.log('Initializing app - version:', Date.now());
+                const config = await fetch('/api/config?v=' + Date.now()).then(r => r.json());
                 
                 if (config.demoMode) {
                     switchMode('demo');
@@ -283,25 +310,40 @@
 
         async function initializeTwilioDevice() {
             try {
-                // Check if we're in demo mode for browser calling
-                const config = await fetch('/api/config').then(r => r.json());
+                console.log('🚀 Starting Twilio Device initialization...');
+                
+                // Check if Twilio SDK is loaded
+                if (typeof Twilio === 'undefined') {
+                    console.error('❌ Twilio SDK not loaded');
+                    throw new Error('Twilio SDK not loaded - check network connection');
+                }
+                console.log('✅ Twilio SDK loaded successfully');
+                
+                // Check if we're in demo mode for browser calling  
+                const config = await fetch('/api/config?v=' + Date.now()).then(r => r.json());
+                console.log('📋 Config received:', config);
+                
                 if (config.demoMode) {
-                    // Mock browser calling for demo
+                    console.log('🎭 Using demo mode for browser calling');
                     initializeMockBrowserCalling();
                     return;
                 }
                 
-                const tokenResponse = await fetch('/api/token');
-                console.log('Token response status:', tokenResponse.status);
+                console.log('🔐 Fetching access token...');
+                const tokenResponse = await fetch('/api/token?v=' + Date.now());
+                console.log('📡 Token response status:', tokenResponse.status);
+                
                 if (!tokenResponse.ok) {
                     const errorText = await tokenResponse.text();
-                    console.error('Token response error:', errorText);
+                    console.error('❌ Token response error:', errorText);
                     throw new Error(`Failed to get Twilio token: ${errorText}`);
                 }
                 
-                const { accessToken } = await tokenResponse.json();
+                const tokenData = await tokenResponse.json();
+                console.log('✅ Token received for identity:', tokenData.identity);
                 
-                twilioDevice = new Twilio.Device(accessToken);
+                console.log('📱 Creating Twilio Device...');
+                twilioDevice = new Twilio.Device(tokenData.accessToken);
                 
                 twilioDevice.on('ready', () => {
                     console.log('Twilio Device ready for browser calling');
@@ -529,10 +571,21 @@
             }
         });
 
-        // Initialize app
-        initializeApp();
-        refreshCalls();
-        setInterval(refreshCalls, 5000);
+        // Wait for Twilio SDK to load, then initialize app
+        function waitForTwilioSDK() {
+            if (typeof Twilio !== 'undefined') {
+                console.log('✅ Twilio SDK ready, initializing app...');
+                initializeApp();
+                refreshCalls();
+                setInterval(refreshCalls, 5000);
+            } else {
+                console.log('⏳ Waiting for Twilio SDK...');
+                setTimeout(waitForTwilioSDK, 100);
+            }
+        }
+        
+        // Start initialization after page loads
+        waitForTwilioSDK();
     </script>
 </body>
 </html>

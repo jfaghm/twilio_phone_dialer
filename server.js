@@ -379,8 +379,13 @@ app.get('/api/token', async (req, res) => {
 
         accessToken.addGrant(voiceGrant);
 
+        const jwt = accessToken.toJwt();
+        console.log('🔑 Generated token for identity:', accessToken.identity);
+        console.log('📱 TwiML App SID:', process.env.TWILIO_TWIML_APP_SID);
+        console.log('🔧 Using API Key SID:', process.env.TWILIO_API_KEY_SID || process.env.TWILIO_ACCOUNT_SID);
+
         res.json({
-            accessToken: accessToken.toJwt(),
+            accessToken: jwt,
             identity: accessToken.identity
         });
     } catch (error) {
