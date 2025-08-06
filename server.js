@@ -34,13 +34,17 @@ const initializeServer = async () => {
 
 app.post('/api/call', async (req, res) => {
     try {
-        const { phoneNumber } = req.body;
+        const { phoneNumber, mode } = req.body;
         
         if (!phoneNumber || !phoneNumber.match(/^\+?[1-9]\d{1,14}$/)) {
             return res.status(400).json({ error: 'Invalid phone number format' });
         }
 
-        if (process.env.DEMO_MODE === 'true') {
+        // Determine calling mode (client mode overrides server config)
+        const callingMode = mode || (process.env.DEMO_MODE === 'true' ? 'demo' : 
+                                   process.env.BROWSER_CALLING === 'true' ? 'browser' : 'phone');
+
+        if (callingMode === 'demo') {
             const mockCallSid = 'CA' + Math.random().toString(36).substr(2, 32);
             
             await db.insertCall(phoneNumber, mockCallSid);
@@ -66,6 +70,15 @@ app.post('/api/call', async (req, res) => {
             return res.json({ success: true, callSid: mockCallSid });
         }
 
+        if (callingMode === 'browser') {
+            // Browser calls are handled client-side, but we can log them
+            const mockCallSid = 'CA' + Math.random().toString(36).substr(2, 32);
+            await db.insertCall(phoneNumber, mockCallSid);
+            console.log(`BROWSER MODE: Client-side call initiated to ${phoneNumber}`);
+            return res.json({ success: true, callSid: mockCallSid, mode: 'browser' });
+        }
+
+        // Phone mode - traditional Twilio call
         if (!twilioClient) {
             return res.status(500).json({ error: 'Twilio not configured' });
         }
@@ -81,6 +94,7 @@ app.post('/api/call', async (req, res) => {
         });
 
         await db.insertCall(phoneNumber, call.sid);
+        console.log(`PHONE MODE: Traditional call initiated to ${phoneNumber} with SID ${call.sid}`);
         
         res.json({ success: true, callSid: call.sid });
         
@@ -189,6 +203,39 @@ app.post('/api/webhooks/transcription', async (req, res) => {
     }
 });
 
+app.get('/api/token', async (req, res) => {
+    try {
+        if (!twilioClient) {
+            return res.status(500).json({ error: 'Twilio not configured' });
+        }
+
+        const AccessToken = twilio.jwt.AccessToken;
+        const VoiceGrant = AccessToken.VoiceGrant;
+
+        const accessToken = new AccessToken(
+            process.env.TWILIO_ACCOUNT_SID,
+            process.env.TWILIO_API_KEY_SID || process.env.TWILIO_ACCOUNT_SID,
+            process.env.TWILIO_API_KEY_SECRET || process.env.TWILIO_AUTH_TOKEN,
+            { identity: `browser-user-${Date.now()}` }
+        );
+
+        const voiceGrant = new VoiceGrant({
+            outgoingApplicationSid: process.env.TWILIO_TWIML_APP_SID,
+            incomingAllow: false
+        });
+
+        accessToken.addGrant(voiceGrant);
+
+        res.json({
+            accessToken: accessToken.toJwt(),
+            identity: accessToken.identity
+        });
+    } catch (error) {
+        console.error('Error generating token:', error);
+        res.status(500).json({ error: 'Failed to generate token' });
+    }
+});
+
 app.get('/api/calls', async (req, res) => {
     try {
         const calls = await db.getAllCalls();
@@ -197,6 +244,14 @@ app.get('/api/calls', async (req, res) => {
         console.error('Error fetching calls:', error);
         res.status(500).json({ error: 'Failed to fetch calls' });
     }
+});
+
+app.get('/api/config', (req, res) => {
+    res.json({
+        demoMode: process.env.DEMO_MODE === 'true',
+        browserCalling: process.env.BROWSER_CALLING === 'true',
+        phoneCalling: process.env.PHONE_CALLING === 'true'
+    });
 });
 
 app.get('/api/events', (req, res) => {

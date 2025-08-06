@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Twilio Phone Dialer</title>
+    <script src="https://sdk.twilio.com/js/client/releases/1.14.1/twilio.min.js"></script>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -91,9 +92,111 @@
             color: #666;
             padding: 40px;
         }
+        
+        .mode-selector {
+            background: #e9ecef;
+            padding: 15px;
+            border-radius: 8px;
+            margin-bottom: 20px;
+            border: 1px solid #ddd;
+        }
+        
+        .mode-selector h3 {
+            margin-top: 0;
+            margin-bottom: 10px;
+        }
+        
+        .mode-toggle {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        
+        .mode-option {
+            padding: 8px 16px;
+            border: 2px solid #007bff;
+            border-radius: 20px;
+            background: white;
+            cursor: pointer;
+            font-size: 14px;
+            transition: all 0.3s;
+        }
+        
+        .mode-option.active {
+            background: #007bff;
+            color: white;
+        }
+        
+        .mode-option:hover {
+            background: #0056b3;
+            color: white;
+        }
+        
+        .browser-controls {
+            display: none;
+            margin-top: 15px;
+            padding: 10px;
+            background: #f8f9fa;
+            border-radius: 4px;
+        }
+        
+        .browser-controls.active {
+            display: block;
+        }
+        
+        .audio-controls {
+            display: flex;
+            gap: 10px;
+            margin-top: 10px;
+        }
+        
+        .audio-controls button {
+            padding: 8px 12px;
+            font-size: 14px;
+        }
+        
+        .audio-controls .hangup {
+            background: #dc3545;
+        }
+        
+        .audio-controls .hangup:hover {
+            background: #c82333;
+        }
+        
+        .call-status {
+            margin-top: 10px;
+            font-weight: bold;
+        }
+        
+        .call-status.connecting { color: orange; }
+        .call-status.connected { color: green; }
+        .call-status.disconnected { color: gray; }
     </style>
 </head>
 <body>
+    <div class="mode-selector">
+        <h3>Calling Mode</h3>
+        <div class="mode-toggle">
+            <div class="mode-option active" onclick="switchMode('demo')" id="demo-mode">
+                📱 Demo Mode
+            </div>
+            <div class="mode-option" onclick="switchMode('phone')" id="phone-mode">
+                ☎️ Phone Mode
+            </div>
+            <div class="mode-option" onclick="switchMode('browser')" id="browser-mode">
+                🌐 Browser Mode
+            </div>
+        </div>
+        <div class="browser-controls" id="browser-controls">
+            <div>🎧 Browser calling enabled - calls will be made directly in your browser</div>
+            <div class="audio-controls" id="audio-controls" style="display: none;">
+                <button onclick="muteCall()" id="mute-btn">🔇 Mute</button>
+                <button onclick="hangupCall()" id="hangup-btn" class="hangup">📞 Hang Up</button>
+            </div>
+            <div id="call-status" class="call-status"></div>
+        </div>
+    </div>
+
     <div class="dialer">
         <h1>Twilio Phone Dialer</h1>
         <div class="form-group">
@@ -128,11 +231,139 @@
 
     <script>
         let isLoading = false;
+        let currentMode = 'demo';
+        let twilioDevice = null;
+        let currentConnection = null;
+
+        // Initialize the app
+        async function initializeApp() {
+            try {
+                const config = await fetch('/api/config').then(r => r.json());
+                
+                if (config.demoMode) {
+                    switchMode('demo');
+                } else if (config.browserCalling) {
+                    switchMode('browser');
+                } else if (config.phoneCalling) {
+                    switchMode('phone');
+                }
+            } catch (error) {
+                console.error('Error fetching config:', error);
+            }
+        }
+
+        function switchMode(mode) {
+            currentMode = mode;
+            
+            // Update UI
+            document.querySelectorAll('.mode-option').forEach(el => el.classList.remove('active'));
+            document.getElementById(`${mode}-mode`).classList.add('active');
+            
+            const browserControls = document.getElementById('browser-controls');
+            if (mode === 'browser') {
+                browserControls.classList.add('active');
+                initializeTwilioDevice();
+            } else {
+                browserControls.classList.remove('active');
+                if (twilioDevice) {
+                    twilioDevice.destroy();
+                    twilioDevice = null;
+                }
+            }
+            
+            // Update status message
+            const statusMessages = {
+                demo: 'Demo mode: Calls will be simulated for testing',
+                phone: 'Phone mode: Your phone will ring first, then target number',
+                browser: 'Browser mode: Calls will be made directly in your browser'
+            };
+            
+            showStatus(statusMessages[mode], 'info');
+        }
+
+        async function initializeTwilioDevice() {
+            try {
+                // Check if we're in demo mode for browser calling
+                const config = await fetch('/api/config').then(r => r.json());
+                if (config.demoMode) {
+                    // Mock browser calling for demo
+                    initializeMockBrowserCalling();
+                    return;
+                }
+                
+                const tokenResponse = await fetch('/api/token');
+                if (!tokenResponse.ok) {
+                    throw new Error('Failed to get Twilio token - TwiML App SID may be missing');
+                }
+                
+                const { accessToken } = await tokenResponse.json();
+                
+                twilioDevice = new Twilio.Device(accessToken);
+                
+                twilioDevice.on('ready', () => {
+                    console.log('Twilio Device ready for browser calling');
+                    showCallStatus('Ready for browser calls', 'ready');
+                });
+                
+                twilioDevice.on('error', (error) => {
+                    console.error('Twilio Device error:', error);
+                    showCallStatus('Error: ' + error.message, 'error');
+                });
+                
+                twilioDevice.on('connect', (connection) => {
+                    currentConnection = connection;
+                    showCallStatus('Connected', 'connected');
+                    document.getElementById('audio-controls').style.display = 'flex';
+                    document.getElementById('callButton').disabled = true;
+                });
+                
+                twilioDevice.on('disconnect', (connection) => {
+                    currentConnection = null;
+                    showCallStatus('Call ended', 'disconnected');
+                    document.getElementById('audio-controls').style.display = 'none';
+                    document.getElementById('callButton').disabled = false;
+                    
+                    setTimeout(refreshCalls, 1000);
+                });
+                
+                twilioDevice.on('incoming', (connection) => {
+                    console.log('Incoming call from:', connection.parameters.From);
+                });
+                
+            } catch (error) {
+                console.error('Error initializing Twilio Device:', error);
+                showCallStatus('Failed to initialize browser calling - need TwiML App SID', 'error');
+            }
+        }
+
+        function initializeMockBrowserCalling() {
+            showCallStatus('Demo browser calling ready (simulated)', 'ready');
+            console.log('Mock browser calling initialized');
+        }
+
+        function showCallStatus(message, type) {
+            const statusDiv = document.getElementById('call-status');
+            statusDiv.textContent = message;
+            statusDiv.className = `call-status ${type}`;
+        }
+
+        function muteCall() {
+            if (currentConnection) {
+                const isMuted = currentConnection.isMuted();
+                currentConnection.mute(!isMuted);
+                document.getElementById('mute-btn').textContent = isMuted ? '🔇 Mute' : '🔊 Unmute';
+            }
+        }
+
+        function hangupCall() {
+            if (currentConnection) {
+                currentConnection.disconnect();
+            }
+        }
 
         async function makeCall() {
             const phoneNumber = document.getElementById('phoneNumber').value.trim();
             const button = document.getElementById('callButton');
-            const statusDiv = document.getElementById('status');
             
             if (!phoneNumber) {
                 showStatus('Please enter a phone number', 'error');
@@ -144,6 +375,48 @@
                 return;
             }
 
+            if (currentMode === 'browser') {
+                // Check if we're in demo mode
+                const config = await fetch('/api/config').then(r => r.json()).catch(() => ({}));
+                if (config.demoMode) {
+                    // Mock browser call
+                    showCallStatus('Connecting...', 'connecting');
+                    showStatus('Demo browser call initiated', 'success');
+                    
+                    document.getElementById('audio-controls').style.display = 'flex';
+                    document.getElementById('callButton').disabled = true;
+                    
+                    setTimeout(() => {
+                        showCallStatus('Connected (demo)', 'connected');
+                    }, 2000);
+                    
+                    setTimeout(() => {
+                        showCallStatus('Call ended (demo)', 'disconnected');
+                        document.getElementById('audio-controls').style.display = 'none';
+                        document.getElementById('callButton').disabled = false;
+                    }, 8000);
+                    
+                    return;
+                }
+                
+                // Real browser calling using Twilio Device
+                if (!twilioDevice || twilioDevice.status() !== 'ready') {
+                    showStatus('Browser calling not ready. Need TwiML App SID configured.', 'error');
+                    return;
+                }
+                
+                try {
+                    showCallStatus('Connecting...', 'connecting');
+                    currentConnection = twilioDevice.connect({ To: phoneNumber });
+                    showStatus('Browser call initiated', 'success');
+                } catch (error) {
+                    console.error('Browser call error:', error);
+                    showStatus('Failed to make browser call: ' + error.message, 'error');
+                }
+                return;
+            }
+
+            // Demo or Phone mode - use existing API
             button.disabled = true;
             isLoading = true;
             showStatus('Initiating call...', 'info');
@@ -152,7 +425,7 @@
                 const response = await fetch('/api/call', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ phoneNumber })
+                    body: JSON.stringify({ phoneNumber, mode: currentMode })
                 });
                 
                 const result = await response.json();
@@ -161,9 +434,13 @@
                     throw new Error(result.error || 'Call failed');
                 }
                 
-                showStatus(`Call initiated successfully! Call SID: ${result.callSid}`, 'success');
-                document.getElementById('phoneNumber').value = '';
+                if (currentMode === 'demo') {
+                    showStatus(`Demo call initiated successfully! Call SID: ${result.callSid}`, 'success');
+                } else {
+                    showStatus(`Call initiated! Your phone will ring first. Call SID: ${result.callSid}`, 'success');
+                }
                 
+                document.getElementById('phoneNumber').value = '';
                 setTimeout(refreshCalls, 1000);
                 
             } catch (error) {
@@ -236,6 +513,8 @@
             }
         });
 
+        // Initialize app
+        initializeApp();
         refreshCalls();
         setInterval(refreshCalls, 5000);
     </script>
