@@ -8,10 +8,108 @@ const port = process.env.PORT || 3000;
 
 let db;
 let twilioClient;
+let intelligenceServiceSid;
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static('public'));
+
+const initializeIntelligenceService = async () => {
+    try {
+        if (!twilioClient) return;
+        
+        console.log('Checking Intelligence Service...');
+        
+        // Check if service already exists
+        const services = await twilioClient.intelligence.v2.services.list({ limit: 1 });
+        
+        if (services.length > 0) {
+            intelligenceServiceSid = services[0].sid;
+            console.log(`Using existing Intelligence Service: ${intelligenceServiceSid}`);
+        } else {
+            // Create new Intelligence Service
+            const service = await twilioClient.intelligence.v2.services.create({
+                uniqueName: 'phone-dialer-transcription',
+                friendlyName: 'Phone Dialer Transcription Service',
+                dataLogging: false // For privacy
+            });
+            
+            intelligenceServiceSid = service.sid;
+            console.log(`Created Intelligence Service: ${intelligenceServiceSid}`);
+        }
+    } catch (error) {
+        console.error('Failed to initialize Intelligence Service:', error);
+        console.log('Transcription will fall back to legacy method');
+        intelligenceServiceSid = null;
+    }
+};
+
+const checkPendingTranscripts = async () => {
+    if (!twilioClient || !db) return;
+    
+    try {
+        console.log('🔄 Checking for pending transcripts...');
+        
+        // Get calls with processing or pending transcript status
+        const calls = await db.getAllCalls(50);
+        const pendingCalls = calls.filter(call => 
+            call.transcript_status === 'processing' || 
+            call.transcript_status === 'pending'
+        );
+        
+        if (pendingCalls.length === 0) {
+            console.log('✅ No pending transcripts to check');
+            return;
+        }
+        
+        console.log(`🔍 Found ${pendingCalls.length} calls with pending transcripts`);
+        
+        // List all transcripts from Intelligence API
+        const transcripts = await twilioClient.intelligence.v2.transcripts.list({ limit: 100 });
+        console.log(`📋 Retrieved ${transcripts.length} transcripts from Intelligence API`);
+        
+        let updatedCount = 0;
+        
+        for (const call of pendingCalls) {
+            if (!call.recording_sid) continue;
+            
+            // Find matching transcript by recording SID
+            const matchingTranscript = transcripts.find(t => 
+                t.channel && 
+                t.channel.media_properties && 
+                t.channel.media_properties.source_sid === call.recording_sid
+            );
+            
+            if (matchingTranscript && matchingTranscript.status === 'completed') {
+                try {
+                    console.log(`✅ Found completed transcript for call ${call.twilio_call_sid}: ${matchingTranscript.sid}`);
+                    
+                    // Extract transcript text
+                    const sentences = await twilioClient.intelligence.v2.transcripts(matchingTranscript.sid).sentences.list();
+                    if (sentences.length > 0) {
+                        const transcriptText = sentences.map(s => s.transcript).join(' ');
+                        await db.updateTranscript(call.twilio_call_sid, transcriptText, 'completed');
+                        console.log(`📝 Updated transcript for call ${call.twilio_call_sid}: ${transcriptText.substring(0, 50)}...`);
+                        updatedCount++;
+                    } else {
+                        console.log(`⚠️ Transcript ${matchingTranscript.sid} completed but has no sentences`);
+                        await db.updateTranscript(call.twilio_call_sid, 'Transcript completed but no text available', 'completed');
+                        updatedCount++;
+                    }
+                } catch (extractError) {
+                    console.error(`❌ Error extracting text for transcript ${matchingTranscript.sid}:`, extractError);
+                }
+            }
+        }
+        
+        if (updatedCount > 0) {
+            console.log(`🎉 Successfully updated ${updatedCount} transcripts`);
+        }
+        
+    } catch (error) {
+        console.error('Error checking pending transcripts:', error);
+    }
+};
 
 const initializeServer = async () => {
     try {
@@ -22,6 +120,13 @@ const initializeServer = async () => {
         if (process.env.TWILIO_ACCOUNT_SID && process.env.TWILIO_AUTH_TOKEN) {
             twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
             console.log('Twilio client initialized');
+            
+            // Initialize Intelligence Service for transcription
+            await initializeIntelligenceService();
+            
+            // Start periodic transcript checking (every 2 minutes)
+            setInterval(checkPendingTranscripts, 2 * 60 * 1000);
+            console.log('🔄 Started periodic transcript checking (every 2 minutes)');
         } else {
             console.warn('Twilio credentials not found. Please check your .env file');
         }
@@ -105,6 +210,30 @@ app.post('/api/call', async (req, res) => {
     }
 });
 
+app.post('/api/webhooks/browser-voice', (req, res) => {
+    const twiml = new twilio.twiml.VoiceResponse();
+    const targetNumber = req.body.To; // From browser calling
+    
+    if (!targetNumber) {
+        twiml.say('Error: No target number specified.');
+        twiml.hangup();
+    } else {
+        twiml.say('Connecting your browser call. Please wait.');
+        twiml.dial({
+            callerId: process.env.TWILIO_PHONE_NUMBER,
+            record: 'record-from-answer-dual',
+            recordingStatusCallback: `${process.env.WEBHOOK_BASE_URL}/api/webhooks/recording`,
+            recordingStatusCallbackEvent: ['completed'],
+            transcribe: true,
+            transcribeCallback: `${process.env.WEBHOOK_BASE_URL}/api/webhooks/transcription`,
+            timeout: 30
+        }, targetNumber);
+    }
+    
+    res.type('text/xml');
+    res.send(twiml.toString());
+});
+
 app.post('/api/webhooks/voice', (req, res) => {
     const twiml = new twilio.twiml.VoiceResponse();
     const targetNumber = req.query.target;
@@ -119,6 +248,8 @@ app.post('/api/webhooks/voice', (req, res) => {
             record: 'record-from-answer-dual',
             recordingStatusCallback: `${process.env.WEBHOOK_BASE_URL}/api/webhooks/recording`,
             recordingStatusCallbackEvent: ['completed'],
+            transcribe: true,
+            transcribeCallback: `${process.env.WEBHOOK_BASE_URL}/api/webhooks/transcription`,
             timeout: 30
         }, targetNumber);
     }
@@ -131,41 +262,21 @@ app.post('/api/webhooks/recording', async (req, res) => {
     try {
         const { CallSid, RecordingUrl, RecordingSid, CallDuration } = req.body;
         
+        console.log(`🎙️ Recording webhook received:`);
+        console.log(`  Call SID: ${CallSid}`);
+        console.log(`  Recording SID: ${RecordingSid}`);
+        console.log(`  Recording URL: ${RecordingUrl}`);
+        console.log(`  Duration: ${CallDuration} seconds`);
+        
         await db.updateRecording(CallSid, RecordingUrl, RecordingSid);
         await db.updateCallStatus(CallSid, 'completed', parseInt(CallDuration) || 0);
         
-        console.log(`Recording completed for call ${CallSid}: ${RecordingUrl}`);
+        console.log(`✅ Database updated for call ${CallSid}`);
+        console.log(`🎙️ Recording completed - transcription will be handled via TwiML transcribeCallback`);
         
-        // Initiate modern transcription using Twilio Speech Recognition
-        if (twilioClient && !process.env.DEMO_MODE) {
-            try {
-                await db.updateTranscript(CallSid, null, 'processing');
-                
-                const transcript = await twilioClient.intelligence.v2.transcripts.create({
-                    recordingSid: RecordingSid,
-                    operationCallback: `${process.env.WEBHOOK_BASE_URL}/api/webhooks/transcription`
-                });
-                
-                console.log(`Transcription initiated for call ${CallSid}: ${transcript.sid}`);
-            } catch (transcriptionError) {
-                console.error('Error initiating transcription:', transcriptionError);
-                console.error('Transcription error details:', transcriptionError.code, transcriptionError.message);
-                
-                // Fallback: Try legacy transcription if Intelligence API fails
-                try {
-                    console.log('Attempting fallback to legacy transcription...');
-                    const recording = await twilioClient.recordings(RecordingSid).fetch();
-                    
-                    if (recording) {
-                        await twilioClient.recordings(RecordingSid).transcriptions.create();
-                        console.log('Legacy transcription initiated as fallback');
-                        await db.updateTranscript(CallSid, null, 'processing_legacy');
-                    }
-                } catch (legacyError) {
-                    console.error('Legacy transcription also failed:', legacyError);
-                    await db.updateTranscript(CallSid, 'Transcription service unavailable - both Intelligence API and legacy transcription failed. Please contact Twilio support to enable transcription services for your account.', 'unavailable');
-                }
-            }
+        // Set initial transcription status - will be updated by transcription webhook
+        if (process.env.DEMO_MODE !== 'true') {
+            await db.updateTranscript(CallSid, null, 'processing');
         }
         
         res.sendStatus(200);
@@ -192,50 +303,50 @@ app.post('/api/webhooks/status', async (req, res) => {
 
 app.post('/api/webhooks/transcription', async (req, res) => {
     try {
-        const { transcript_sid, status, recording_sid, TranscriptionSid, TranscriptionText, RecordingSid } = req.body;
+        const { 
+            CallSid, 
+            TranscriptionSid, 
+            TranscriptionText, 
+            TranscriptionStatus, 
+            RecordingSid 
+        } = req.body;
         
-        console.log(`Transcription webhook - Modern: ${transcript_sid}, Legacy: ${TranscriptionSid}, status: ${status}`);
+        console.log(`📋 Legacy transcription webhook received:`);
+        console.log(`  Full body:`, req.body);
+        console.log(`  Call SID: ${CallSid}`);
+        console.log(`  Transcription SID: ${TranscriptionSid}`);
+        console.log(`  Transcription Status: ${TranscriptionStatus}`);
+        console.log(`  Recording SID: ${RecordingSid}`);
+        console.log(`  Has transcript text: ${!!TranscriptionText}`);
         
-        // Handle legacy transcription completion
-        if (TranscriptionText && RecordingSid) {
-            console.log('Processing legacy transcription completion');
+        if (CallSid) {
+            // Direct call SID mapping - much simpler!
+            if (TranscriptionStatus === 'completed' && TranscriptionText) {
+                await db.updateTranscript(CallSid, TranscriptionText, 'completed');
+                console.log(`✅ Transcription completed for call ${CallSid}: ${TranscriptionText.substring(0, 50)}...`);
+            } else if (TranscriptionStatus === 'failed') {
+                await db.updateTranscript(CallSid, 'Transcription failed', 'failed');
+                console.log(`❌ Transcription failed for call ${CallSid}`);
+            } else {
+                console.log(`📝 Transcription status: ${TranscriptionStatus} for call ${CallSid}`);
+            }
+        } else if (RecordingSid) {
+            // Fallback: find call by recording SID
+            console.log('No direct CallSid, searching by RecordingSid...');
             const calls = await db.getAllCalls(100);
             const matchingCall = calls.find(call => call.recording_sid === RecordingSid);
             
             if (matchingCall) {
-                await db.updateTranscript(matchingCall.twilio_call_sid, TranscriptionText, 'completed');
-                console.log(`Legacy transcription completed for call ${matchingCall.twilio_call_sid}`);
-            }
-            
-            res.sendStatus(200);
-            return;
-        }
-        
-        // Handle modern Intelligence API transcription
-        if (status === 'completed' && twilioClient) {
-            try {
-                // Fetch the completed transcript
-                const transcript = await twilioClient.intelligence.v2.transcripts(transcript_sid).fetch();
-                
-                // Find the call by recording SID
-                // Note: We'd need to store recording_sid -> call_sid mapping for this to work perfectly
-                // For now, we'll update any call with this recording SID
-                const calls = await db.getAllCalls(100);
-                const matchingCall = calls.find(call => call.recording_sid === recording_sid);
-                
-                if (matchingCall && transcript.results) {
-                    const transcriptText = transcript.results.transcript || 'Transcription completed but no text available';
-                    await db.updateTranscript(matchingCall.twilio_call_sid, transcriptText, 'completed');
-                    console.log(`Transcription completed for call ${matchingCall.twilio_call_sid}`);
-                } else {
-                    console.log('No matching call found for transcription or no transcript results');
+                if (TranscriptionStatus === 'completed' && TranscriptionText) {
+                    await db.updateTranscript(matchingCall.twilio_call_sid, TranscriptionText, 'completed');
+                    console.log(`✅ Transcription completed for call ${matchingCall.twilio_call_sid}`);
+                } else if (TranscriptionStatus === 'failed') {
+                    await db.updateTranscript(matchingCall.twilio_call_sid, 'Transcription failed', 'failed');
+                    console.log(`❌ Transcription failed for call ${matchingCall.twilio_call_sid}`);
                 }
-            } catch (fetchError) {
-                console.error('Error fetching completed transcript:', fetchError);
+            } else {
+                console.log(`⚠️ No matching call found for recording ${RecordingSid}`);
             }
-        } else if (status === 'failed') {
-            console.log('Transcription failed');
-            // Could update the transcript status to 'failed' here if we had the call SID
         }
         
         res.sendStatus(200);
@@ -294,6 +405,166 @@ app.get('/api/config', (req, res) => {
         browserCalling: process.env.BROWSER_CALLING === 'true',
         phoneCalling: process.env.PHONE_CALLING === 'true'
     });
+});
+
+app.post('/api/manual-transcript', async (req, res) => {
+    try {
+        const { callSid, transcriptText } = req.body;
+        
+        if (!callSid || !transcriptText) {
+            return res.status(400).json({ error: 'callSid and transcriptText are required' });
+        }
+        
+        await db.updateTranscript(callSid, transcriptText, 'completed');
+        console.log(`📝 Manual transcript added for call ${callSid}`);
+        
+        res.json({ success: true, message: 'Transcript added successfully' });
+    } catch (error) {
+        console.error('Error adding manual transcript:', error);
+        res.status(500).json({ error: 'Failed to add transcript' });
+    }
+});
+
+app.post('/api/check-transcripts', async (req, res) => {
+    try {
+        await checkPendingTranscripts();
+        res.json({ success: true, message: 'Transcript check completed' });
+    } catch (error) {
+        console.error('Error in manual transcript check:', error);
+        res.status(500).json({ error: `Failed to check transcripts: ${error.message}` });
+    }
+});
+
+app.post('/api/find-transcript', async (req, res) => {
+    try {
+        const { recordingSid, callSid } = req.body;
+        
+        if (!recordingSid || !callSid) {
+            return res.status(400).json({ error: 'recordingSid and callSid are required' });
+        }
+        
+        if (!twilioClient) {
+            return res.status(500).json({ error: 'Twilio not configured' });
+        }
+        
+        console.log(`🔍 Searching for transcripts with recording SID: ${recordingSid}`);
+        
+        // List all transcripts and find the one matching our recording SID
+        const transcripts = await twilioClient.intelligence.v2.transcripts.list({ limit: 50 });
+        
+        console.log(`📋 Found ${transcripts.length} transcripts, searching for match...`);
+        
+        const matchingTranscript = transcripts.find(t => 
+            t.channel && 
+            t.channel.media_properties && 
+            t.channel.media_properties.source_sid === recordingSid
+        );
+        
+        if (matchingTranscript) {
+            console.log(`✅ Found matching transcript: ${matchingTranscript.sid} (status: ${matchingTranscript.status})`);
+            
+            if (matchingTranscript.status === 'completed') {
+                // Fetch the transcript text using our existing logic
+                try {
+                    const sentences = await twilioClient.intelligence.v2.transcripts(matchingTranscript.sid).sentences.list();
+                    if (sentences.length > 0) {
+                        const transcriptText = sentences.map(s => s.transcript).join(' ');
+                        await db.updateTranscript(callSid, transcriptText, 'completed');
+                        console.log(`✅ Transcript text extracted and saved: ${transcriptText.substring(0, 100)}...`);
+                        res.json({ success: true, transcriptSid: matchingTranscript.sid, transcriptText });
+                    } else {
+                        res.json({ success: false, message: 'Transcript completed but no sentences found', transcriptSid: matchingTranscript.sid });
+                    }
+                } catch (textError) {
+                    console.error('Error extracting transcript text:', textError);
+                    res.json({ success: false, message: 'Transcript found but text extraction failed', transcriptSid: matchingTranscript.sid });
+                }
+            } else {
+                res.json({ success: false, message: `Transcript found but status is: ${matchingTranscript.status}`, transcriptSid: matchingTranscript.sid });
+            }
+        } else {
+            console.log(`❌ No transcript found for recording SID: ${recordingSid}`);
+            res.json({ success: false, message: 'No transcript found for this recording' });
+        }
+        
+    } catch (error) {
+        console.error('Error searching for transcript:', error);
+        res.status(500).json({ error: `Failed to search for transcript: ${error.message}` });
+    }
+});
+
+app.post('/api/fetch-transcript', async (req, res) => {
+    try {
+        const { transcriptSid, callSid } = req.body;
+        
+        if (!transcriptSid || !callSid) {
+            return res.status(400).json({ error: 'transcriptSid and callSid are required' });
+        }
+        
+        if (!twilioClient) {
+            return res.status(500).json({ error: 'Twilio not configured' });
+        }
+        
+        console.log(`🔍 Fetching transcript ${transcriptSid} for call ${callSid}`);
+        
+        const transcript = await twilioClient.intelligence.v2.transcripts(transcriptSid).fetch();
+        
+        console.log(`📋 Transcript status: ${transcript.status}`);
+        console.log(`📋 Full transcript object:`, JSON.stringify(transcript, null, 2));
+        
+        // Also try to fetch sentences/results separately
+        try {
+            const sentences = await twilioClient.intelligence.v2.transcripts(transcriptSid).sentences.list();
+            console.log(`📋 Sentences found: ${sentences.length}`);
+            if (sentences.length > 0) {
+                console.log(`📋 First sentence:`, sentences[0]);
+            }
+        } catch (sentenceError) {
+            console.log(`📋 Could not fetch sentences:`, sentenceError.message);
+        }
+        
+        if (transcript.status === 'completed') {
+            // Try different possible locations for transcript text
+            let transcriptText = null;
+            
+            // Try to get text from sentences if available
+            try {
+                const sentences = await twilioClient.intelligence.v2.transcripts(transcriptSid).sentences.list();
+                if (sentences.length > 0) {
+                    transcriptText = sentences.map(s => s.transcript).join(' ');
+                    console.log(`📋 Extracted text from ${sentences.length} sentences`);
+                }
+            } catch (sentenceError) {
+                console.log(`📋 Could not extract from sentences: ${sentenceError.message}`);
+            }
+            
+            // Fallback to transcript object properties
+            if (!transcriptText) {
+                if (transcript.results && transcript.results.transcript) {
+                    transcriptText = transcript.results.transcript;
+                } else if (transcript.results && transcript.results.transcripts) {
+                    transcriptText = transcript.results.transcripts[0]?.transcript;
+                } else if (transcript.transcript) {
+                    transcriptText = transcript.transcript;
+                } else if (transcript.text) {
+                    transcriptText = transcript.text;
+                } else {
+                    transcriptText = 'Transcription completed but text format not recognized. Check server logs for structure.';
+                }
+            }
+            
+            await db.updateTranscript(callSid, transcriptText, 'completed');
+            console.log(`✅ Transcript fetched and saved: ${transcriptText.substring(0, 100)}...`);
+            res.json({ success: true, message: 'Transcript fetched and saved', transcriptText });
+        } else {
+            console.log(`⏳ Transcript not ready yet, status: ${transcript.status}`);
+            res.json({ success: false, message: `Transcript status: ${transcript.status}` });
+        }
+        
+    } catch (error) {
+        console.error('Error fetching transcript:', error);
+        res.status(500).json({ error: `Failed to fetch transcript: ${error.message}` });
+    }
 });
 
 app.get('/api/events', (req, res) => {
@@ -364,11 +635,17 @@ process.on('SIGINT', () => {
     process.exit(0);
 });
 
-initializeServer().then(() => {
-    app.listen(port, () => {
-        console.log(`Server running on port ${port}`);
-        console.log(`Health check: http://localhost:${port}/health`);
+// Only start server if not in test mode
+if (process.env.NODE_ENV !== 'test') {
+    initializeServer().then(() => {
+        app.listen(port, () => {
+            console.log(`Server running on port ${port}`);
+            console.log(`Health check: http://localhost:${port}/health`);
+        });
     });
-});
+} else {
+    // For testing, initialize without starting server
+    initializeServer();
+}
 
 module.exports = app;

@@ -65,17 +65,30 @@ class Database {
                         return;
                     }
                     console.log('Calls table created successfully');
-                });
-
-                createIndexes.forEach(indexSQL => {
-                    this.db.run(indexSQL, (err) => {
-                        if (err) {
-                            console.error('Error creating index:', err.message);
-                        }
+                    
+                    // Create indexes after table creation
+                    let indexCount = 0;
+                    const totalIndexes = createIndexes.length;
+                    
+                    if (totalIndexes === 0) {
+                        resolve();
+                        return;
+                    }
+                    
+                    createIndexes.forEach(indexSQL => {
+                        this.db.run(indexSQL, (err) => {
+                            if (err) {
+                                console.error('Error creating index:', err.message);
+                                reject(err);
+                                return;
+                            }
+                            indexCount++;
+                            if (indexCount === totalIndexes) {
+                                resolve();
+                            }
+                        });
                     });
                 });
-
-                resolve();
             });
         });
     }

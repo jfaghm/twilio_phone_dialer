@@ -292,8 +292,11 @@
                 }
                 
                 const tokenResponse = await fetch('/api/token');
+                console.log('Token response status:', tokenResponse.status);
                 if (!tokenResponse.ok) {
-                    throw new Error('Failed to get Twilio token - TwiML App SID may be missing');
+                    const errorText = await tokenResponse.text();
+                    console.error('Token response error:', errorText);
+                    throw new Error(`Failed to get Twilio token: ${errorText}`);
                 }
                 
                 const { accessToken } = await tokenResponse.json();
@@ -482,7 +485,7 @@
                     const duration = call.duration_seconds ? `${call.duration_seconds}s` : '-';
                     const recordingLink = call.recording_url ? `<a href="${call.recording_url}" target="_blank">Listen</a>` : '-';
                     const transcript = call.transcript_text ? 
-                        `<a href="#" onclick="showTranscript('${call.transcript_text.replace(/'/g, '\\\'')}')" title="Click to view">View</a>` : 
+                        `<a href="#" onclick="showTranscript(${call.id})" title="Click to view">View</a>` : 
                         call.transcript_status || '-';
                     
                     return `
@@ -503,8 +506,21 @@
             }
         }
 
-        function showTranscript(text) {
-            alert(`Transcript:\n\n${text}`);
+        async function showTranscript(callId) {
+            try {
+                const response = await fetch('/api/calls');
+                const calls = await response.json();
+                const call = calls.find(c => c.id === callId);
+                
+                if (call && call.transcript_text) {
+                    alert(`Transcript:\n\n${call.transcript_text}`);
+                } else {
+                    alert('Transcript not available');
+                }
+            } catch (error) {
+                console.error('Error fetching transcript:', error);
+                alert('Failed to load transcript');
+            }
         }
 
         document.getElementById('phoneNumber').addEventListener('keypress', function(e) {
