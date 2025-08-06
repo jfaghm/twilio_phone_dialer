@@ -40,6 +40,32 @@ app.post('/api/call', async (req, res) => {
             return res.status(400).json({ error: 'Invalid phone number format' });
         }
 
+        if (process.env.DEMO_MODE === 'true') {
+            const mockCallSid = 'CA' + Math.random().toString(36).substr(2, 32);
+            
+            await db.insertCall(phoneNumber, mockCallSid);
+            console.log(`DEMO MODE: Simulated call to ${phoneNumber} with SID ${mockCallSid}`);
+            
+            setTimeout(async () => {
+                try {
+                    await db.updateCallStatus(mockCallSid, 'completed', Math.floor(Math.random() * 120) + 10);
+                    await db.updateRecording(mockCallSid, 
+                        'https://api.twilio.com/demo-recording.wav', 
+                        'RE' + Math.random().toString(36).substr(2, 32)
+                    );
+                    await db.updateTranscript(mockCallSid, 
+                        'This is a demo transcript. The call was successfully completed in demo mode.',
+                        'completed'
+                    );
+                    console.log(`DEMO MODE: Simulated call ${mockCallSid} completed with recording and transcript`);
+                } catch (error) {
+                    console.error('Error in demo mode simulation:', error);
+                }
+            }, 3000);
+            
+            return res.json({ success: true, callSid: mockCallSid });
+        }
+
         if (!twilioClient) {
             return res.status(500).json({ error: 'Twilio not configured' });
         }
@@ -60,7 +86,8 @@ app.post('/api/call', async (req, res) => {
         
     } catch (error) {
         console.error('Error making call:', error);
-        res.status(500).json({ error: 'Failed to initiate call' });
+        console.error('Error details:', error.message, error.code, error.moreInfo);
+        res.status(500).json({ error: error.message || 'Failed to initiate call' });
     }
 });
 
