@@ -84,8 +84,8 @@ app.post('/api/call', async (req, res) => {
         }
 
         const call = await twilioClient.calls.create({
-            url: `${process.env.WEBHOOK_BASE_URL}/api/webhooks/voice`,
-            to: phoneNumber,
+            url: `${process.env.WEBHOOK_BASE_URL}/api/webhooks/voice?target=${encodeURIComponent(phoneNumber)}`,
+            to: '+19147140068', // Your verified caller ID number
             from: process.env.TWILIO_PHONE_NUMBER,
             record: true,
             recordingStatusCallback: `${process.env.WEBHOOK_BASE_URL}/api/webhooks/recording`,
@@ -107,10 +107,21 @@ app.post('/api/call', async (req, res) => {
 
 app.post('/api/webhooks/voice', (req, res) => {
     const twiml = new twilio.twiml.VoiceResponse();
+    const targetNumber = req.query.target;
     
-    twiml.say('This call is being recorded for quality and training purposes.');
-    twiml.pause({ length: 1 });
-    twiml.say('Thank you for using our service. This call will now end.');
+    if (!targetNumber) {
+        twiml.say('Error: No target number specified.');
+        twiml.hangup();
+    } else {
+        twiml.say('Connecting your call. Please wait.');
+        twiml.dial({
+            callerId: process.env.TWILIO_PHONE_NUMBER,
+            record: 'record-from-answer-dual',
+            recordingStatusCallback: `${process.env.WEBHOOK_BASE_URL}/api/webhooks/recording`,
+            recordingStatusCallbackEvent: ['completed'],
+            timeout: 30
+        }, targetNumber);
+    }
     
     res.type('text/xml');
     res.send(twiml.toString());
@@ -138,7 +149,22 @@ app.post('/api/webhooks/recording', async (req, res) => {
                 console.log(`Transcription initiated for call ${CallSid}: ${transcript.sid}`);
             } catch (transcriptionError) {
                 console.error('Error initiating transcription:', transcriptionError);
-                await db.updateTranscript(CallSid, null, 'failed');
+                console.error('Transcription error details:', transcriptionError.code, transcriptionError.message);
+                
+                // Fallback: Try legacy transcription if Intelligence API fails
+                try {
+                    console.log('Attempting fallback to legacy transcription...');
+                    const recording = await twilioClient.recordings(RecordingSid).fetch();
+                    
+                    if (recording) {
+                        await twilioClient.recordings(RecordingSid).transcriptions.create();
+                        console.log('Legacy transcription initiated as fallback');
+                        await db.updateTranscript(CallSid, null, 'processing_legacy');
+                    }
+                } catch (legacyError) {
+                    console.error('Legacy transcription also failed:', legacyError);
+                    await db.updateTranscript(CallSid, 'Transcription service unavailable - both Intelligence API and legacy transcription failed. Please contact Twilio support to enable transcription services for your account.', 'unavailable');
+                }
             }
         }
         
@@ -166,10 +192,26 @@ app.post('/api/webhooks/status', async (req, res) => {
 
 app.post('/api/webhooks/transcription', async (req, res) => {
     try {
-        const { transcript_sid, status, recording_sid } = req.body;
+        const { transcript_sid, status, recording_sid, TranscriptionSid, TranscriptionText, RecordingSid } = req.body;
         
-        console.log(`Transcription webhook: ${transcript_sid}, status: ${status}`);
+        console.log(`Transcription webhook - Modern: ${transcript_sid}, Legacy: ${TranscriptionSid}, status: ${status}`);
         
+        // Handle legacy transcription completion
+        if (TranscriptionText && RecordingSid) {
+            console.log('Processing legacy transcription completion');
+            const calls = await db.getAllCalls(100);
+            const matchingCall = calls.find(call => call.recording_sid === RecordingSid);
+            
+            if (matchingCall) {
+                await db.updateTranscript(matchingCall.twilio_call_sid, TranscriptionText, 'completed');
+                console.log(`Legacy transcription completed for call ${matchingCall.twilio_call_sid}`);
+            }
+            
+            res.sendStatus(200);
+            return;
+        }
+        
+        // Handle modern Intelligence API transcription
         if (status === 'completed' && twilioClient) {
             try {
                 // Fetch the completed transcript
