@@ -210,28 +210,54 @@ app.post('/api/call', async (req, res) => {
     }
 });
 
-app.post('/api/webhooks/browser-voice', (req, res) => {
-    const twiml = new twilio.twiml.VoiceResponse();
-    const targetNumber = req.body.To; // From browser calling
-    
-    if (!targetNumber) {
-        twiml.say('Error: No target number specified.');
+app.post('/api/webhooks/browser-voice', async (req, res) => {
+    try {
+        const twiml = new twilio.twiml.VoiceResponse();
+        const targetNumber = req.body.To; // From browser calling
+        const callSid = req.body.CallSid; // Twilio call SID
+        const from = req.body.From; // Browser identity
+        
+        console.log(`🌐 Browser call initiated:`);
+        console.log(`  Call SID: ${callSid}`);
+        console.log(`  From: ${from}`);
+        console.log(`  To: ${targetNumber}`);
+        
+        if (!targetNumber) {
+            twiml.say('Error: No target number specified.');
+            twiml.hangup();
+        } else {
+            // Log browser call to database
+            if (db && callSid) {
+                try {
+                    await db.insertCall(targetNumber, callSid);
+                    console.log(`✅ Browser call logged to database: ${callSid}`);
+                } catch (dbError) {
+                    console.error('Error logging browser call to database:', dbError);
+                }
+            }
+            
+            twiml.say('Connecting your browser call. Please wait.');
+            twiml.dial({
+                callerId: process.env.TWILIO_PHONE_NUMBER,
+                record: 'record-from-answer-dual',
+                recordingStatusCallback: `${process.env.WEBHOOK_BASE_URL}/api/webhooks/recording`,
+                recordingStatusCallbackEvent: ['completed'],
+                transcribe: true,
+                transcribeCallback: `${process.env.WEBHOOK_BASE_URL}/api/webhooks/transcription`,
+                timeout: 30
+            }, targetNumber);
+        }
+        
+        res.type('text/xml');
+        res.send(twiml.toString());
+    } catch (error) {
+        console.error('Error processing browser voice webhook:', error);
+        const twiml = new twilio.twiml.VoiceResponse();
+        twiml.say('An error occurred. Please try again.');
         twiml.hangup();
-    } else {
-        twiml.say('Connecting your browser call. Please wait.');
-        twiml.dial({
-            callerId: process.env.TWILIO_PHONE_NUMBER,
-            record: 'record-from-answer-dual',
-            recordingStatusCallback: `${process.env.WEBHOOK_BASE_URL}/api/webhooks/recording`,
-            recordingStatusCallbackEvent: ['completed'],
-            transcribe: true,
-            transcribeCallback: `${process.env.WEBHOOK_BASE_URL}/api/webhooks/transcription`,
-            timeout: 30
-        }, targetNumber);
+        res.type('text/xml');
+        res.send(twiml.toString());
     }
-    
-    res.type('text/xml');
-    res.send(twiml.toString());
 });
 
 app.post('/api/webhooks/voice', (req, res) => {

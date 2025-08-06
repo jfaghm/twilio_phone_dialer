@@ -571,6 +571,30 @@
             }
         });
 
+        // Check for processing transcripts and trigger manual check if needed
+        async function checkProcessingTranscripts() {
+            try {
+                const response = await fetch('/api/calls');
+                const calls = await response.json();
+                
+                const processingCalls = calls.filter(call => 
+                    call.transcript_status === 'processing' && 
+                    call.recording_sid &&
+                    // Only check calls that are at least 30 seconds old
+                    (new Date() - new Date(call.updated_at)) > 30000
+                );
+                
+                if (processingCalls.length > 0) {
+                    console.log(`🔄 Found ${processingCalls.length} calls with stuck transcripts, triggering check...`);
+                    await fetch('/api/check-transcripts', { method: 'POST' });
+                    // Refresh calls after checking
+                    setTimeout(refreshCalls, 2000);
+                }
+            } catch (error) {
+                console.error('Error checking processing transcripts:', error);
+            }
+        }
+
         // Wait for Twilio SDK to load, then initialize app
         function waitForTwilioSDK() {
             if (typeof Twilio !== 'undefined') {
@@ -578,6 +602,9 @@
                 initializeApp();
                 refreshCalls();
                 setInterval(refreshCalls, 5000);
+                
+                // Check for stuck transcripts every 30 seconds
+                setInterval(checkProcessingTranscripts, 30000);
             } else {
                 console.log('⏳ Waiting for Twilio SDK...');
                 setTimeout(waitForTwilioSDK, 100);
