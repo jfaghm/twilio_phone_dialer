@@ -111,6 +111,23 @@ app.post('/api/webhooks/recording', async (req, res) => {
         
         console.log(`Recording completed for call ${CallSid}: ${RecordingUrl}`);
         
+        // Initiate modern transcription using Twilio Speech Recognition
+        if (twilioClient && !process.env.DEMO_MODE) {
+            try {
+                await db.updateTranscript(CallSid, null, 'processing');
+                
+                const transcript = await twilioClient.intelligence.v2.transcripts.create({
+                    recordingSid: RecordingSid,
+                    operationCallback: `${process.env.WEBHOOK_BASE_URL}/api/webhooks/transcription`
+                });
+                
+                console.log(`Transcription initiated for call ${CallSid}: ${transcript.sid}`);
+            } catch (transcriptionError) {
+                console.error('Error initiating transcription:', transcriptionError);
+                await db.updateTranscript(CallSid, null, 'failed');
+            }
+        }
+        
         res.sendStatus(200);
     } catch (error) {
         console.error('Error processing recording webhook:', error);
@@ -129,6 +146,45 @@ app.post('/api/webhooks/status', async (req, res) => {
         res.sendStatus(200);
     } catch (error) {
         console.error('Error processing status webhook:', error);
+        res.sendStatus(500);
+    }
+});
+
+app.post('/api/webhooks/transcription', async (req, res) => {
+    try {
+        const { transcript_sid, status, recording_sid } = req.body;
+        
+        console.log(`Transcription webhook: ${transcript_sid}, status: ${status}`);
+        
+        if (status === 'completed' && twilioClient) {
+            try {
+                // Fetch the completed transcript
+                const transcript = await twilioClient.intelligence.v2.transcripts(transcript_sid).fetch();
+                
+                // Find the call by recording SID
+                // Note: We'd need to store recording_sid -> call_sid mapping for this to work perfectly
+                // For now, we'll update any call with this recording SID
+                const calls = await db.getAllCalls(100);
+                const matchingCall = calls.find(call => call.recording_sid === recording_sid);
+                
+                if (matchingCall && transcript.results) {
+                    const transcriptText = transcript.results.transcript || 'Transcription completed but no text available';
+                    await db.updateTranscript(matchingCall.twilio_call_sid, transcriptText, 'completed');
+                    console.log(`Transcription completed for call ${matchingCall.twilio_call_sid}`);
+                } else {
+                    console.log('No matching call found for transcription or no transcript results');
+                }
+            } catch (fetchError) {
+                console.error('Error fetching completed transcript:', fetchError);
+            }
+        } else if (status === 'failed') {
+            console.log('Transcription failed');
+            // Could update the transcript status to 'failed' here if we had the call SID
+        }
+        
+        res.sendStatus(200);
+    } catch (error) {
+        console.error('Error processing transcription webhook:', error);
         res.sendStatus(500);
     }
 });
