@@ -195,7 +195,10 @@ app.post('/api/call', async (req, res) => {
             record: true,
             recordingStatusCallback: `${process.env.WEBHOOK_BASE_URL}/api/webhooks/recording`,
             recordingStatusCallbackEvent: ['completed'],
-            recordingStatusCallbackMethod: 'POST'
+            recordingStatusCallbackMethod: 'POST',
+            statusCallback: `${process.env.WEBHOOK_BASE_URL}/api/webhooks/status`,
+            statusCallbackEvent: ['completed'],
+            statusCallbackMethod: 'POST'
         });
 
         await db.insertCall(phoneNumber, call.sid);
@@ -293,9 +296,10 @@ app.post('/api/webhooks/recording', async (req, res) => {
         console.log(`  Recording SID: ${RecordingSid}`);
         console.log(`  Recording URL: ${RecordingUrl}`);
         console.log(`  Duration: ${CallDuration} seconds`);
+        console.log(`  Full webhook body:`, req.body);
         
         await db.updateRecording(CallSid, RecordingUrl, RecordingSid);
-        await db.updateCallStatus(CallSid, 'completed', parseInt(CallDuration) || 0);
+        // Note: Call duration will be updated by the status webhook, not here
         
         console.log(`✅ Database updated for call ${CallSid}`);
         console.log(`🎙️ Recording completed - transcription will be handled via TwiML transcribeCallback`);
@@ -316,9 +320,15 @@ app.post('/api/webhooks/status', async (req, res) => {
     try {
         const { CallSid, CallStatus, CallDuration } = req.body;
         
+        console.log(`📞 Call status webhook received:`);
+        console.log(`  Call SID: ${CallSid}`);
+        console.log(`  Status: ${CallStatus}`);
+        console.log(`  Duration: ${CallDuration} seconds`);
+        console.log(`  Full status body:`, req.body);
+        
         await db.updateCallStatus(CallSid, CallStatus.toLowerCase(), parseInt(CallDuration) || 0);
         
-        console.log(`Call status updated: ${CallSid} -> ${CallStatus}`);
+        console.log(`✅ Call status updated: ${CallSid} -> ${CallStatus} (${CallDuration}s)`);
         
         res.sendStatus(200);
     } catch (error) {
@@ -463,6 +473,68 @@ app.post('/api/check-transcripts', async (req, res) => {
     } catch (error) {
         console.error('Error in manual transcript check:', error);
         res.status(500).json({ error: `Failed to check transcripts: ${error.message}` });
+    }
+});
+
+app.post('/api/backfill-durations', async (req, res) => {
+    try {
+        if (!twilioClient) {
+            return res.status(500).json({ error: 'Twilio not configured' });
+        }
+        
+        console.log('🔄 Starting duration backfill for existing calls...');
+        
+        // Get all calls with duration_seconds = 0
+        const calls = await db.getAllCalls(100);
+        const callsWithNoDuration = calls.filter(call => call.duration_seconds === 0 && call.twilio_call_sid);
+        
+        console.log(`📋 Found ${callsWithNoDuration.length} calls missing duration`);
+        
+        if (callsWithNoDuration.length === 0) {
+            return res.json({ success: true, message: 'No calls need duration updates', updated: 0 });
+        }
+        
+        let updatedCount = 0;
+        let errors = 0;
+        
+        for (const call of callsWithNoDuration) {
+            try {
+                console.log(`🔍 Fetching duration for call ${call.twilio_call_sid}...`);
+                
+                // Fetch call details from Twilio
+                const twilioCall = await twilioClient.calls(call.twilio_call_sid).fetch();
+                
+                const duration = twilioCall.duration ? parseInt(twilioCall.duration) : 0;
+                
+                if (duration > 0) {
+                    await db.updateCallStatus(call.twilio_call_sid, 'completed', duration);
+                    console.log(`✅ Updated call ${call.twilio_call_sid} with duration: ${duration}s`);
+                    updatedCount++;
+                } else {
+                    console.log(`⚠️ Call ${call.twilio_call_sid} has no duration data`);
+                }
+                
+                // Small delay to avoid rate limiting
+                await new Promise(resolve => setTimeout(resolve, 100));
+                
+            } catch (callError) {
+                console.error(`❌ Error fetching call ${call.twilio_call_sid}:`, callError.message);
+                errors++;
+            }
+        }
+        
+        console.log(`🎉 Duration backfill completed: ${updatedCount} updated, ${errors} errors`);
+        
+        res.json({ 
+            success: true, 
+            message: `Duration backfill completed: ${updatedCount} calls updated, ${errors} errors`,
+            updated: updatedCount,
+            errors: errors
+        });
+        
+    } catch (error) {
+        console.error('Error in duration backfill:', error);
+        res.status(500).json({ error: `Failed to backfill durations: ${error.message}` });
     }
 });
 
