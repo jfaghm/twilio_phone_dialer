@@ -162,6 +162,53 @@ class Database {
         });
     }
 
+    appendTranscript(callSid, transcriptSegment) {
+        return new Promise((resolve, reject) => {
+            // First get current transcript
+            const getSql = 'SELECT transcript_text FROM calls WHERE twilio_call_sid = ?';
+            this.db.get(getSql, [callSid], (err, row) => {
+                if (err) {
+                    reject(err);
+                    return;
+                }
+                
+                const currentTranscript = row?.transcript_text || '';
+                const newTranscript = currentTranscript + (currentTranscript ? ' ' : '') + transcriptSegment;
+                
+                const updateSql = `UPDATE calls SET 
+                    transcript_text = ?, 
+                    transcript_status = 'streaming', 
+                    updated_at = CURRENT_TIMESTAMP 
+                    WHERE twilio_call_sid = ?`;
+                
+                this.db.run(updateSql, [newTranscript, callSid], function(err) {
+                    if (err) {
+                        reject(err);
+                    } else {
+                        resolve({ changes: this.changes, newTranscript });
+                    }
+                });
+            });
+        });
+    }
+
+    updateTranscriptStatus(callSid, status) {
+        return new Promise((resolve, reject) => {
+            const sql = `UPDATE calls SET 
+                transcript_status = ?, 
+                updated_at = CURRENT_TIMESTAMP 
+                WHERE twilio_call_sid = ?`;
+            
+            this.db.run(sql, [status, callSid], function(err) {
+                if (err) {
+                    reject(err);
+                } else {
+                    resolve({ changes: this.changes });
+                }
+            });
+        });
+    }
+
     getAllCalls(limit = 100) {
         return new Promise((resolve, reject) => {
             const sql = 'SELECT * FROM calls ORDER BY created_at DESC LIMIT ?';
@@ -183,6 +230,23 @@ class Database {
                     reject(err);
                 } else {
                     resolve(row);
+                }
+            });
+        });
+    }
+
+    getPendingTranscripts(limit = 20) {
+        return new Promise((resolve, reject) => {
+            const sql = `SELECT * FROM calls 
+                        WHERE transcript_status IN ('pending', 'processing') 
+                        AND recording_sid IS NOT NULL 
+                        ORDER BY created_at DESC 
+                        LIMIT ?`;
+            this.db.all(sql, [limit], (err, rows) => {
+                if (err) {
+                    reject(err);
+                } else {
+                    resolve(rows);
                 }
             });
         });

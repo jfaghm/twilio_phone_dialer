@@ -203,10 +203,7 @@
     <div class="mode-selector">
         <h3>Calling Mode</h3>
         <div class="mode-toggle">
-            <div class="mode-option active" onclick="switchMode('demo')" id="demo-mode">
-                📱 Demo Mode
-            </div>
-            <div class="mode-option" onclick="switchMode('phone')" id="phone-mode">
+            <div class="mode-option active" onclick="switchMode('phone')" id="phone-mode">
                 ☎️ Phone Mode
             </div>
             <div class="mode-option" onclick="switchMode('browser')" id="browser-mode">
@@ -236,11 +233,7 @@
         <div id="status" class="status"></div>
     </div>
 
-    <h2>Call History 
-        <button onclick="backfillDurations()" style="margin-left: 20px; padding: 5px 10px; font-size: 12px; background: #28a745; color: white;">
-            Update Durations
-        </button>
-    </h2>
+    <h2>Call History</h2>
     <table id="callsTable">
         <thead>
             <tr>
@@ -261,7 +254,7 @@
 
     <script>
         let isLoading = false;
-        let currentMode = 'demo';
+        let currentMode = 'phone';
         let twilioDevice = null;
         let currentConnection = null;
 
@@ -271,11 +264,9 @@
                 console.log('Initializing app - version:', Date.now());
                 const config = await fetch('/api/config?v=' + Date.now()).then(r => r.json());
                 
-                if (config.demoMode) {
-                    switchMode('demo');
-                } else if (config.browserCalling) {
+                if (config.browserCalling) {
                     switchMode('browser');
-                } else if (config.phoneCalling) {
+                } else {
                     switchMode('phone');
                 }
             } catch (error) {
@@ -304,7 +295,6 @@
             
             // Update status message
             const statusMessages = {
-                demo: 'Demo mode: Calls will be simulated for testing',
                 phone: 'Phone mode: Your phone will ring first, then target number',
                 browser: 'Browser mode: Calls will be made directly in your browser'
             };
@@ -323,15 +313,9 @@
                 }
                 console.log('✅ Twilio SDK loaded successfully');
                 
-                // Check if we're in demo mode for browser calling  
+                // Check server configuration  
                 const config = await fetch('/api/config?v=' + Date.now()).then(r => r.json());
                 console.log('📋 Config received:', config);
-                
-                if (config.demoMode) {
-                    console.log('🎭 Using demo mode for browser calling');
-                    initializeMockBrowserCalling();
-                    return;
-                }
                 
                 console.log('🔐 Fetching access token...');
                 const tokenResponse = await fetch('/api/token?v=' + Date.now());
@@ -385,10 +369,6 @@
             }
         }
 
-        function initializeMockBrowserCalling() {
-            showCallStatus('Demo browser calling ready (simulated)', 'ready');
-            console.log('Mock browser calling initialized');
-        }
 
         function showCallStatus(message, type) {
             const statusDiv = document.getElementById('call-status');
@@ -425,30 +405,7 @@
             }
 
             if (currentMode === 'browser') {
-                // Check if we're in demo mode
-                const config = await fetch('/api/config').then(r => r.json()).catch(() => ({}));
-                if (config.demoMode) {
-                    // Mock browser call
-                    showCallStatus('Connecting...', 'connecting');
-                    showStatus('Demo browser call initiated', 'success');
-                    
-                    document.getElementById('audio-controls').style.display = 'flex';
-                    document.getElementById('callButton').disabled = true;
-                    
-                    setTimeout(() => {
-                        showCallStatus('Connected (demo)', 'connected');
-                    }, 2000);
-                    
-                    setTimeout(() => {
-                        showCallStatus('Call ended (demo)', 'disconnected');
-                        document.getElementById('audio-controls').style.display = 'none';
-                        document.getElementById('callButton').disabled = false;
-                    }, 8000);
-                    
-                    return;
-                }
-                
-                // Real browser calling using Twilio Device
+                // Browser calling using Twilio Device
                 if (!twilioDevice || twilioDevice.status() !== 'ready') {
                     showStatus('Browser calling not ready. Need TwiML App SID configured.', 'error');
                     return;
@@ -465,7 +422,7 @@
                 return;
             }
 
-            // Demo or Phone mode - use existing API
+            // Phone mode - use existing API
             button.disabled = true;
             isLoading = true;
             showStatus('Initiating call...', 'info');
@@ -483,11 +440,7 @@
                     throw new Error(result.error || 'Call failed');
                 }
                 
-                if (currentMode === 'demo') {
-                    showStatus(`Demo call initiated successfully! Call SID: ${result.callSid}`, 'success');
-                } else {
-                    showStatus(`Call initiated! Your phone will ring first. Call SID: ${result.callSid}`, 'success');
-                }
+                showStatus(`Call initiated! Your phone will ring first. Call SID: ${result.callSid}`, 'success');
                 
                 document.getElementById('phoneNumber').value = '';
                 setTimeout(refreshCalls, 1000);
@@ -530,9 +483,20 @@
                     const createdAt = new Date(call.created_at).toLocaleString();
                     const duration = call.duration_seconds ? `${call.duration_seconds}s` : '-';
                     const recordingLink = call.recording_url ? `<a href="${call.recording_url}" target="_blank">Listen</a>` : '-';
-                    const transcript = call.transcript_text ? 
-                        `<a href="#" onclick="showTranscript(${call.id})" title="Click to view">View</a>` : 
-                        call.transcript_status || '-';
+                    let transcript;
+                    if (call.transcript_text && call.transcript_text.trim()) {
+                        transcript = `<a href="#" onclick="showTranscript(${call.id})" title="Click to view">View</a>`;
+                    } else {
+                        const status = call.transcript_status || 'pending';
+                        const statusMap = {
+                            'pending': '⏳ Pending',
+                            'streaming': '🔄 Recording',
+                            'processing': '🔄 Processing',
+                            'completed': '❌ No speech',
+                            'failed': '❌ Failed'
+                        };
+                        transcript = statusMap[status] || status;
+                    }
                     
                     return `
                         <tr>
@@ -569,24 +533,29 @@
             }
         }
 
-        async function backfillDurations() {
+        async function cleanupTranscripts() {
             try {
-                showStatus('Updating call durations...', 'info');
+                showStatus('Cleaning up stuck transcripts...', 'info');
                 
-                const response = await fetch('/api/backfill-durations', { method: 'POST' });
+                const response = await fetch('/api/cleanup-transcripts', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' }
+                });
+                
                 const result = await response.json();
                 
-                if (result.success) {
-                    showStatus(`Duration update completed: ${result.updated} calls updated`, 'success');
+                if (response.ok) {
+                    showStatus(`Cleanup completed: ${result.updated} transcripts fixed`, 'success');
                     setTimeout(refreshCalls, 1000);
                 } else {
-                    showStatus('Failed to update durations', 'error');
+                    showStatus(`Cleanup failed: ${result.error}`, 'error');
                 }
             } catch (error) {
-                console.error('Error updating durations:', error);
-                showStatus('Failed to update durations', 'error');
+                console.error('Error cleaning up transcripts:', error);
+                showStatus('Failed to cleanup transcripts', 'error');
             }
         }
+
 
         document.getElementById('phoneNumber').addEventListener('keypress', function(e) {
             if (e.key === 'Enter' && !isLoading) {
@@ -594,29 +563,6 @@
             }
         });
 
-        // Check for processing transcripts and trigger manual check if needed
-        async function checkProcessingTranscripts() {
-            try {
-                const response = await fetch('/api/calls');
-                const calls = await response.json();
-                
-                const processingCalls = calls.filter(call => 
-                    call.transcript_status === 'processing' && 
-                    call.recording_sid &&
-                    // Only check calls that are at least 30 seconds old
-                    (new Date() - new Date(call.updated_at)) > 30000
-                );
-                
-                if (processingCalls.length > 0) {
-                    console.log(`🔄 Found ${processingCalls.length} calls with stuck transcripts, triggering check...`);
-                    await fetch('/api/check-transcripts', { method: 'POST' });
-                    // Refresh calls after checking
-                    setTimeout(refreshCalls, 2000);
-                }
-            } catch (error) {
-                console.error('Error checking processing transcripts:', error);
-            }
-        }
 
         // Wait for Twilio SDK to load, then initialize app
         function waitForTwilioSDK() {
@@ -625,9 +571,6 @@
                 initializeApp();
                 refreshCalls();
                 setInterval(refreshCalls, 5000);
-                
-                // Check for stuck transcripts every 30 seconds
-                setInterval(checkProcessingTranscripts, 30000);
             } else {
                 console.log('⏳ Waiting for Twilio SDK...');
                 setTimeout(waitForTwilioSDK, 100);
