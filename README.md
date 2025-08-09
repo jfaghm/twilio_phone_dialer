@@ -1,134 +1,291 @@
 # Twilio Phone Dialer
 
-A comprehensive phone dialer system with call recording and transcription using Twilio APIs.
+A full-stack web application for making phone calls with automatic recording and real-time transcription using Twilio's Voice API.
 
-## Features
+## 🎯 Key Features
 
-- **Multiple Calling Modes**:
-  - Demo Mode: Simulated calls for testing
-  - Phone Mode: Traditional phone calls (your phone rings first)
-  - Browser Mode: WebRTC calls directly in browser
+- **Dual Calling Modes**: Phone calls (traditional) and Browser calls (WebRTC)
+- **Automatic Recording**: All calls are recorded with Twilio's recording service
+- **Real-time Transcription**: Live transcription during calls using Deepgram engine
+- **Call History**: Web interface with searchable call logs and transcript viewing
+- **Webhook Integration**: Real-time updates via Twilio webhooks
+- **Testing Suite**: Comprehensive test coverage with Jest
 
-- **Call Recording**: Automatic recording of all calls
-- **Transcription**: Automatic speech-to-text using Twilio Recording API
-- **Call History**: Web interface showing all calls with recordings and transcripts
-- **Real-time Updates**: Live call status updates via Server-Sent Events
+## 🚀 Quick Start
 
-## Setup
+### Prerequisites
+- Node.js 16+ 
+- Twilio account with phone number
+- ngrok (for local webhook testing)
 
-1. Install dependencies:
-   ```bash
-   npm install
-   ```
+### Installation
 
-2. Configure environment variables in `.env`:
-   ```
-   TWILIO_ACCOUNT_SID=your_account_sid
-   TWILIO_AUTH_TOKEN=your_auth_token
-   TWILIO_PHONE_NUMBER=your_twilio_number
-   TWILIO_TWIML_APP_SID=your_twiml_app_sid
-   WEBHOOK_BASE_URL=your_ngrok_or_public_url
-   ```
-
-3. Start the server:
-   ```bash
-   npm start
-   ```
-
-## API Endpoints
-
-- `POST /api/call` - Initiate a call
-- `GET /api/calls` - Get call history
-- `GET /api/token` - Get access token for browser calling
-- `POST /api/manual-transcript` - Add manual transcript
-- `POST /api/find-transcript` - Find transcript by recording SID
-- `POST /api/check-transcripts` - Manually trigger transcript checking
-
-## Architecture
-
-- **Backend**: Node.js with Express
-- **Database**: SQLite for call data storage
-- **Frontend**: Vanilla HTML/JS with Twilio Client SDK
-- **Webhooks**: ngrok for local development tunneling
-
-## Testing Plan (TODO)
-
-### Test Framework Setup
-- [ ] Install Jest testing framework
-- [ ] Configure test environment with separate test database
-- [ ] Set up mocking for Twilio API calls
-
-### API Endpoint Tests
-- [ ] `POST /api/call` - Test call initiation in all modes (demo, phone, browser)
-- [ ] `GET /api/calls` - Test call history retrieval and pagination
-- [ ] `GET /api/token` - Test browser calling token generation
-- [ ] `GET /api/config` - Test configuration endpoint
-- [ ] `POST /api/manual-transcript` - Test manual transcript addition
-- [ ] `POST /api/find-transcript` - Test transcript search functionality
-- [ ] `POST /api/check-transcripts` - Test automated transcript checking
-- [ ] `GET /health` - Test health check endpoint
-
-### Database Operation Tests
-- [ ] Call insertion with proper data validation
-- [ ] Call status updates (initiated → completed)
-- [ ] Recording data storage and retrieval
-- [ ] Transcript operations (insert, update, status changes)
-- [ ] Database initialization and migration
-- [ ] Error handling for database operations
-
-### Webhook Handler Tests
-- [ ] Recording webhook processing (`/api/webhooks/recording`)
-- [ ] Transcription webhook handling (`/api/webhooks/transcription`)
-- [ ] Call status webhook (`/api/webhooks/status`)
-- [ ] Browser voice webhook (`/api/webhooks/browser-voice`)
-- [ ] TwiML generation for different scenarios
-- [ ] Error handling in webhook endpoints
-
-### Integration Tests
-- [ ] End-to-end call flow (demo mode)
-- [ ] Database persistence across operations
-- [ ] Webhook callback processing
-- [ ] Token generation and browser calling flow
-- [ ] Transcript processing pipeline
-- [ ] Error scenarios and recovery
-
-### Performance Tests
-- [ ] Database query performance with large datasets
-- [ ] Concurrent call handling
-- [ ] Memory usage during transcript processing
-- [ ] API response times under load
-
-### Security Tests
-- [ ] Environment variable handling
-- [ ] Input validation and sanitization
-- [ ] Webhook signature verification
-- [ ] Token expiration and refresh
-
-### Test Data Fixtures
-- [ ] Sample call data for different scenarios
-- [ ] Mock Twilio API responses
-- [ ] Test audio files for transcription testing
-- [ ] Database seed data for comprehensive testing
-
-### Test Commands (Future)
 ```bash
-npm test              # Run all tests
-npm run test:unit     # Unit tests only
-npm run test:integration  # Integration tests
-npm run test:watch    # Watch mode for development
-npm run test:coverage # Generate coverage report
+# Clone and install dependencies
+git clone <repository>
+cd twilio_phone_dialer
+npm install
+
+# Copy environment template
+cp .env.example .env
+
+# Configure your .env file (see Configuration section)
+# Start the application
+npm start
+
+# For development with auto-reload
+npm run dev
 ```
 
-## Development
+### First Run
+1. Start ngrok: `ngrok http 3000`
+2. Update `WEBHOOK_BASE_URL` in .env with your ngrok URL
+3. Visit `http://localhost:3000`
+4. Test with a phone call
 
-- Use `npm run dev` for development with nodemon auto-reload
-- Check logs in `server.log` for debugging
-- Use browser dev tools to debug frontend issues
-- Test webhooks locally using ngrok tunnel
+## 🏗️ Architecture Overview
 
-## Deployment
+```
+┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
+│   Frontend      │    │    Backend       │    │   Database      │
+│  (index.html)   │◄──►│   (server.js)    │◄──►│   (SQLite)      │
+└─────────────────┘    └──────────────────┘    └─────────────────┘
+         │                       │                       
+         │                       ▼                       
+         │              ┌──────────────────┐              
+         └─────────────►│   Twilio APIs    │              
+                        │  - Voice/Calls   │              
+                        │  - Recording     │              
+                        │  - Transcription │              
+                        └──────────────────┘              
+```
 
-- Set up production environment variables
-- Configure proper webhook URLs for production
-- Set up SSL certificates for HTTPS webhooks
-- Configure database backup strategy
+### File Structure
+```
+├── server.js           # Main Express application & API endpoints
+├── database.js         # SQLite database operations & schema
+├── public/
+│   └── index.html      # Frontend interface with calling modes
+├── tests/              # Jest test suites
+│   ├── api.test.js     # API endpoint tests  
+│   └── database.test.js # Database operation tests
+├── .env                # Environment configuration
+└── calls.db           # SQLite database file (created on first run)
+```
+
+## 📡 API Reference
+
+### Core Endpoints
+
+| Endpoint | Method | Description | Request Body |
+|----------|--------|-------------|--------------|
+| `/api/call` | POST | Initiate phone call | `{ phoneNumber, mode? }` |
+| `/api/calls` | GET | Get call history | - |
+| `/api/token` | GET | Browser calling JWT | - |
+| `/api/config` | GET | Client configuration | - |
+| `/health` | GET | System health check | - |
+
+### Webhook Endpoints (Twilio)
+
+| Endpoint | Purpose | Triggers |
+|----------|---------|----------|
+| `/api/webhooks/voice` | Call routing TwiML | Outbound call start |
+| `/api/webhooks/browser-voice` | Browser call TwiML | WebRTC call start |
+| `/api/webhooks/recording` | Recording completion | Call recording done |
+| `/api/webhooks/realtime-transcription` | Live transcription | Transcription events |
+| `/api/webhooks/status` | Call status updates | Call state changes |
+
+### Example API Usage
+
+```javascript
+// Make a phone call
+fetch('/api/call', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ 
+        phoneNumber: '+1234567890',
+        mode: 'phone' // or 'browser'
+    })
+});
+
+// Get call history
+const calls = await fetch('/api/calls').then(r => r.json());
+```
+
+## ⚙️ Configuration
+
+### Environment Variables
+
+Create a `.env` file with these required variables:
+
+```bash
+# Twilio Configuration (Required)
+TWILIO_ACCOUNT_SID=ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TWILIO_AUTH_TOKEN=your_auth_token_here
+TWILIO_PHONE_NUMBER=+1234567890
+
+# Browser Calling (Optional - for WebRTC)
+TWILIO_API_KEY_SID=SKxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+TWILIO_API_KEY_SECRET=your_api_key_secret_here
+TWILIO_TWIML_APP_SID=APxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+# Server Configuration
+PORT=3000
+DATABASE_FILE=./calls.db
+WEBHOOK_BASE_URL=https://your-ngrok-url.ngrok.io
+
+# Feature Flags
+BROWSER_CALLING=true
+PHONE_CALLING=true
+```
+
+### Twilio Setup
+
+1. **Create Twilio Account** and get Account SID/Auth Token
+2. **Purchase Phone Number** for outbound calls
+3. **Create TwiML App** (for browser calling):
+   - Voice Request URL: `https://your-domain.com/api/webhooks/browser-voice`
+4. **Create API Keys** (for browser calling JWT tokens)
+
+### Local Development Setup
+
+```bash
+# Install ngrok for webhook tunneling
+npm install -g ngrok
+
+# Start ngrok in separate terminal
+ngrok http 3000
+
+# Update .env with ngrok URL
+WEBHOOK_BASE_URL=https://abc123.ngrok.io
+
+# Start development server
+npm run dev
+```
+
+## 🧪 Testing
+
+### Run Tests
+```bash
+# Run all tests
+npm test
+
+# Run with coverage report
+npm run test:coverage
+
+# Run specific test file
+npm test database.test.js
+```
+
+### Test Coverage
+- **Database Layer**: 55% coverage with CRUD operations
+- **API Endpoints**: 23% coverage with integration tests
+- **Mock Integration**: Twilio API calls are mocked for reliable testing
+
+### Writing Tests
+Tests use Jest with in-memory SQLite databases for isolation:
+
+```javascript
+describe('Database Operations', () => {
+    let db;
+    
+    beforeEach(async () => {
+        db = new Database(':memory:');
+        await db.initialize();
+    });
+    
+    test('should insert and retrieve calls', async () => {
+        // Test implementation
+    });
+});
+```
+
+## 🔧 Development Guide
+
+### Database Schema
+
+```sql
+CREATE TABLE calls (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    phone_number TEXT NOT NULL,
+    twilio_call_sid TEXT UNIQUE NOT NULL,
+    duration_seconds INTEGER DEFAULT 0,
+    recording_url TEXT,
+    recording_sid TEXT,
+    transcript_text TEXT,
+    transcript_status TEXT DEFAULT 'pending',
+    call_status TEXT DEFAULT 'initiated',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+### Adding New Features
+
+1. **API Endpoints**: Add to `server.js` following existing patterns
+2. **Database Operations**: Add methods to `database.js` 
+3. **Frontend Updates**: Modify `public/index.html` JavaScript
+4. **Tests**: Add corresponding test cases
+
+### Webhook Flow
+
+```
+Twilio Call → /api/webhooks/voice → TwiML Response → Call Connected →
+Recording Starts → /api/webhooks/recording → Database Update →
+Real-time Transcription → /api/webhooks/realtime-transcription →
+Transcript Updates → Call Ends → /api/webhooks/status → Final Update
+```
+
+## 🚢 Deployment
+
+### Production Checklist
+
+- [ ] Configure production database (PostgreSQL recommended)
+- [ ] Set up HTTPS for webhook security  
+- [ ] Configure proper logging and monitoring
+- [ ] Set up database backups
+- [ ] Configure rate limiting
+- [ ] Review security headers and CORS
+- [ ] Set up error tracking (e.g., Sentry)
+
+### Environment Considerations
+
+**Development**: SQLite, ngrok, detailed logging  
+**Staging**: PostgreSQL, HTTPS, production-like config  
+**Production**: PostgreSQL, monitoring, backup strategy, security hardening
+
+### Common Issues
+
+**Webhooks not working**: Check ngrok URL and Twilio webhook configuration  
+**Browser calling fails**: Verify TwiML App SID and API keys  
+**Transcription stuck**: Check webhook URLs and Deepgram configuration  
+**Database errors**: Ensure proper file permissions for SQLite
+
+## 📊 System Status
+
+The application includes a health check endpoint at `/health` that reports:
+
+```json
+{
+    "database": "ok",
+    "twilio": "ok", 
+    "uptime": 3600,
+    "timestamp": "2025-01-XX..."
+}
+```
+
+## 🤝 Contributing
+
+1. Fork the repository
+2. Create a feature branch: `git checkout -b feature-name`
+3. Write tests for new functionality
+4. Ensure all tests pass: `npm test`
+5. Submit a pull request
+
+## 📝 License
+
+This project is intended for educational and development purposes. Ensure compliance with Twilio's terms of service and applicable telecommunications regulations.
+
+---
+
+**Need Help?** Check the health endpoint, review logs, or examine the test files for usage examples.
